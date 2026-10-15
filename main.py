@@ -1,6 +1,7 @@
 import os
 import random
 import re
+import asyncio
 from datetime import date
 
 import discord
@@ -570,7 +571,7 @@ def contexto_classes_jogadores():
     return "\n".join(linhas)
 
 
-def perguntar_gemini(user_id, mensagem, resultado_sorte=None, nome_usuario=None):
+async def perguntar_gemini(user_id, mensagem, resultado_sorte=None, nome_usuario=None):
 
     historico_texto = construir_historico(user_id)
 
@@ -716,12 +717,52 @@ Não mencione porcentagens.
 Responda naturalmente, como uma entidade suprema dentro de um RPG.
 """
 
-    response = gemini_client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=prompt
-    )
+    # Tenta novamente em falhas temporárias da API do Gemini.
+    # 4 tentativas no total, com espera progressiva: 2s, 4s e 8s.
+    max_tentativas = 4
+    for tentativa in range(max_tentativas):
+        try:
+            response = await asyncio.to_thread(
+                gemini_client.models.generate_content,
+                model="gemini-3.6-flash",
+                contents=prompt
+            )
 
-    return response.text.strip()
+            texto_resposta = getattr(response, "text", None)
+            if not texto_resposta or not texto_resposta.strip():
+                raise RuntimeError("O Gemini retornou uma resposta vazia.")
+
+            return texto_resposta.strip()
+
+        except Exception as erro:
+            detalhe = str(erro).lower()
+            status = (
+                getattr(erro, "code", None)
+                or getattr(erro, "status_code", None)
+                or getattr(erro, "status", None)
+            )
+            erro_temporario = (
+                status in (429, 500, 502, 503, 504)
+                or any(codigo in detalhe for codigo in (
+                    "429", "500", "502", "503", "504",
+                    "resource_exhausted", "unavailable",
+                    "high demand", "rate limit", "temporarily"
+                ))
+            )
+
+            # Erros não temporários não devem ser repetidos.
+            if not erro_temporario or tentativa == max_tentativas - 1:
+                raise
+
+            espera = 2 ** (tentativa + 1)
+            print(
+                f"⚠️ Gemini indisponível (tentativa "
+                f"{tentativa + 1}/{max_tentativas}). "
+                f"Nova tentativa em {espera}s. Erro: {erro}"
+            )
+            await asyncio.sleep(espera)
+
+    raise RuntimeError("Não foi possível obter resposta do Gemini.")
 
 
 # ============================================================
@@ -901,7 +942,7 @@ async def godteste(ctx):
             # GEMINI
             # ------------------------------------------------
 
-            resposta = perguntar_gemini(
+            resposta = await perguntar_gemini(
                 ctx.author.id,
                 mensagem,
                 teve_sorte,
@@ -1036,7 +1077,7 @@ async def on_message(message):
                     message.content
                 )
 
-                resposta = perguntar_gemini(
+                resposta = await perguntar_gemini(
                     user_id,
                     message.content,
                     None,
@@ -1079,7 +1120,7 @@ async def on_message(message):
                     "uma bênção hoje."
                 )
 
-                resposta = perguntar_gemini(
+                resposta = await perguntar_gemini(
                     user_id,
                     (
                         f"{message.author.display_name} "
@@ -1158,7 +1199,7 @@ async def on_message(message):
                 "🏰 A Torre está julgando..."
             )
 
-            resposta = perguntar_gemini(
+            resposta = await perguntar_gemini(
                 user_id,
                 message.content,
                 teve_sorte,
